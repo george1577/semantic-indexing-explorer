@@ -4,18 +4,22 @@ import pytest
 from semantic_lab.pipelines import (
     FIXED,
     METHODS,
+    NUMERIC_INDEXES,
     NOTEBOOK_STRUCTURAL,
     STRUCTURAL,
     rank_questions,
     run_chunking,
     run_keyword_vs_embeddings,
     run_table_search,
+    run_written_in,
+    score_numeric_questions,
     search_chunks,
 )
 from semantic_lab.presets import (
     CHUNK_QUESTIONS,
     NOTEBOOK_CHUNKS,
     NOTEBOOK_QUERY,
+    NUMERIC_QUESTIONS,
     ChunkQuestion,
     load_bach,
 )
@@ -70,6 +74,25 @@ def test_table_search_counts_rows_and_returns_both_rankings(fake_embedder):
     products = load_products()
     result = run_table_search(products, "coffee", MetadataFilter(in_stock=False), fake_embedder)
     assert result.rows_total == 30
-    assert result.rows_searched == len(result.hybrid) == len(result.text) == len(result.without_numbers)
+    assert result.rows_searched == len(result.hybrid) == len(result.text) == len(result.text_and_stock)
     assert len(result.unfiltered) == 30
     assert 0 < result.rows_searched < 30
+
+
+def test_numeric_scores_count_correct_rows_within_the_best_possible(fake_embedder):
+    products = load_products()
+    scores = score_numeric_questions(products, NUMERIC_QUESTIONS, fake_embedder)
+    assert len(scores) == len(NUMERIC_QUESTIONS)
+    for score in scores:
+        assert set(score.correct) == set(NUMERIC_INDEXES)
+        assert all(0 <= n <= score.best_possible for n in score.correct.values())
+    in_stock = next(s for s in scores if s.question.query == "products in stock")
+    assert in_stock.rows_correct == sum(p.in_stock for p in products)
+    coffee = next(s for s in scores if s.question.query == "coffee under $30")
+    assert coffee.best_possible == 2
+
+
+def test_written_in_returns_all_rows_in_each_ranking(fake_embedder):
+    products = load_products()
+    result = run_written_in(products, "coffee", fake_embedder)
+    assert len(result.text) == len(result.digits) == len(result.words) == 30

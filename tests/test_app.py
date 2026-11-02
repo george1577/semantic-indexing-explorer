@@ -73,3 +73,16 @@ def test_an_empty_table_query_asks_for_one(app):
     assert any("Enter a query" in info.value for info in app.info)
     next(w for w in app.text_input if w.key == "table_query").set_value("coffee").run()
     assert not app.exception
+
+
+def test_step_six_still_shows_when_filters_match_nothing(app):
+    _widget(app.selectbox, "Category").set_value("Kitchen").run()
+    _widget(app.checkbox, "Notebook's 5 products only").set_value(True).run()
+    assert any("Step 6" in markdown.value for markdown in app.markdown)
+
+
+def test_step_six_controls_rerun(app):
+    _widget(app.slider, "Weight on price").set_value(0.0).run()
+    assert not app.exception
+    next(w for w in app.text_input if w.key == "written_in_query").set_value("").run()
+    assert not app.exception

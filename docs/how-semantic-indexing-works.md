@@ -181,13 +181,21 @@ Notice that the kept rows' similarities don't change. Headphones scored higher t
 | **What it does** | Nudges a row's similarity up or down | Keeps or removes the row |
 | **Effect on similarity** | Changes it, for every query | None |
 | **Follows what you asked?** | No: a query's numbers are invented | Yes: you choose the rule |
-| **Good for** | Not shown to help in this example | Hard facts such as price, stock and category |
+| **Good for** | "Close to X", if the query has a real number (Step 6) | Hard facts such as price, stock and category |
 
-### Step 5: Results with and without the numeric columns
+### Step 5: Results as columns are removed
 
-Here's the top result on the five products, with no filters, as columns are removed:
+The same search runs on three indexes, each built from fewer columns. The filters are off.
 
-| Query | All columns (notebook) | Without numeric columns | Text only |
+| Index | Text (384 numbers) | Price, rating, reviews (3 numbers) | In stock (1 number) | Vector size |
+|---|---|---|---|---:|
+| All columns (the notebook's) | Yes | Yes | Yes | 388 |
+| Text + in-stock flag | Yes | No | Yes | 385 |
+| Text only | Yes | No | No | 384 |
+
+So "text + in-stock flag" is the index with its numeric columns removed, and "text only" also removes the flag. Here's the top result for each:
+
+| Query | All columns (notebook) | Text + in-stock flag | Text only |
 |---|---|---|---|
 | Top Notebook for Gaming and Work | Yoga Mat (0.559) | **Gaming Laptop Pro** (0.810) | **Gaming Laptop Pro** (0.620) |
 | morning caffeine | Yoga Mat (0.571) | **Organic Coffee Beans** (0.633) | **Organic Coffee Beans** (0.265) |
@@ -196,13 +204,113 @@ Here's the top result on the five products, with no filters, as columns are remo
 
 Bold marks the product you'd expect. Reading across:
 
-- **Removing price, rating and reviews fixes most of it.** Three of the four queries now find the right product. So the numeric columns are what override the meaning.
-- **The stock flag does the remaining damage.** The camera is the right answer to the house query but is out of stock, and the query always claims to want stock. It falls from first to last (0.353 text only, 0.250 with the flag), even though nobody asked about stock.
-- **Text only finds the right product on all four.**
+- **Removing price, rating and reviews fixes most of it.** Going from the first column to the second, three of the four queries now find the right product. So the numeric columns are what override the meaning.
+- **Removing the in-stock flag fixes the last one.** Going from the second column to the third, the house query finds the camera.
 
-All 30 products tell the same story. For the gaming query, the notebook's method puts Yoga Mat first and Gaming Laptop Pro 25th. Without the numeric columns, Gaming Laptop Pro is first and the Ultralight Business Notebook second. With more rows Yoga Mat doesn't always win, though it's first or second on all four queries here.
+#### Text + in-stock flag vs text only
 
-This isn't a verdict on combining text and numbers in general. It's this recipe: unweighted numbers, and a query that has no real numeric intent of its own. The app doesn't try other weightings.
+These two differ by a single number, so it's easiest to see on two rows. The query's flag is always 1, and the row's is 1 or 0. For a query and row whose text similarity is *s*:
+
+| | In-stock row | Out-of-stock row |
+|---|---|---|
+| Text only | *s* | *s* |
+| Text + in-stock flag | (*s* + 1) ÷ 2 | *s* ÷ 1.414 |
+
+| Query | Row | In stock | Text only | Text + in-stock flag |
+|---|---|---|---:|---:|
+| Top Notebook for Gaming and Work | Gaming Laptop Pro | Yes | 0.620 | (0.620 + 1) ÷ 2 = **0.810** |
+| something to keep my house safe | Smart Home Security Camera | No | 0.353 | 0.353 ÷ 1.414 = **0.250** |
+
+- **Among in-stock rows, the order doesn't change.** Every one gets the same treatment, so the flag only lifts their similarities.
+- **An out-of-stock row drops below almost all of them.** On the house query, the camera has the best text match but falls from first to last, even though nobody asked about stock.
+
+Removing the flag and using a stock filter (Step 4) gives you the choice per search, instead of always counting stock.
+
+#### With more rows
+
+All 30 products tell the same story. For the gaming query, the notebook's method puts Yoga Mat first and Gaming Laptop Pro 25th. With text + the in-stock flag, Gaming Laptop Pro is first and the Ultralight Business Notebook second. With more rows Yoga Mat doesn't always win, though it's first or second on all four queries here.
+
+### Step 6: Can numbers be indexed in a better way?
+
+Step 5 makes numeric columns look useless. **That's a result of this recipe, not a general rule.** The notebook's recipe has two weaknesses: the query's numbers are invented, and the numeric part has no weight to control how much it counts. Two experiments test other approaches, on all 30 products with no filters.
+
+#### Experiment A: write the numbers into the text
+
+Instead of adding positions to the vector, you can add the numbers to the sentence before embedding it. The vector stays at 384 numbers. There are two ways to write them:
+
+| Index | Text added to Gaming Laptop Pro's sentence |
+|---|---|
+| Digits in the text | `Price: $2499.99. Rating: 4.8 out of 5. Reviews: 156. In stock: yes` |
+| Words in the text | `Price range: luxury. Rating: excellent. Popularity: few reviews. Availability: in stock` |
+
+**It's safe for ordinary searches.** This avoids the Yoga Mat problem entirely, because no separate number can outweigh the meaning. The gaming, caffeine and exercise queries keep the same top result as text only. On the house query the same three products stay on top, in a different order.
+
+**But it barely helps with questions about numbers.** Here's how many of the top 5 results satisfy each query, against the most that could:
+
+| Query | Correct means | Best possible | Text only | Digits in the text | Words in the text | All columns (notebook) |
+|---|---|---:|---:|---:|---:|---:|
+| products under $10 | Under $10 | 4 | 1 | 2 | 1 | 1 |
+| cheap products | Under $50 | 5 | 3 | 4 | 3 | 3 |
+| cheap kitchen tools | Kitchen, under $50 | 3 | 2 | 2 | 2 | 1 |
+| coffee under $30 | Coffee, under $30 | 2 | 2 | 2 | 2 | 1 |
+| luxury items over $1000 | $1000 or more | 4 | 1 | 1 | 1 | 0 |
+| expensive electronics | Electronics, $200 or more | 3 | 3 | 3 | 3 | 1 |
+| products rated 4.8 or higher | Rated 4.8 or more | 4 | 1 | 0 | 1 | 0 |
+| highly rated products | Rated 4.7 or more | 5 | 2 | 2 | 2 | 1 |
+| very popular products with many reviews | 1000 reviews or more | 5 | 0 | 0 | 0 | 0 |
+| out of stock items | Out of stock | 5 | 0 | 0 | 0 | 0 |
+| products in stock | In stock | 5 | 4 | 4 | 4 | 5 |
+| **Total** | | **45** | **19** | **20** | **19** | **13** |
+
+Writing the numbers in moves the total from 19 to 20 at best. "Out of stock items" scores 0 even when the sentence literally says "out of stock". A metadata filter on the same rule would score the best possible every time.
+
+**Why digits don't work.** The model reads a number as text, so it doesn't reliably know that 9000 is more than 100. Similarity between price sentences shows this:
+
+| | $10 | $11 | $100 | $1000 | $9000 |
+|---|---:|---:|---:|---:|---:|
+| **$10** | 1.00 | 0.86 | 0.85 | 0.85 | 0.80 |
+| **$11** | 0.86 | 1.00 | 0.73 | 0.70 | 0.70 |
+| **$100** | 0.85 | 0.73 | 1.00 | 0.84 | 0.81 |
+
+To this model, $10 is about as close to $1000 (0.85) as to $11 (0.86), and $11 is exactly as close to $1000 as to $9000 (0.70). Similarities like these can't express "under $10".
+
+**Why words don't help much either.** Words suit the model better, but the query has to use similar language. "Cheap products" still puts the $1349 Ultralight Business Notebook first, even though every row now states its price range.
+
+**There's a small cost.** Digits are extra text unrelated to meaning, so they dilute the similarity. "exercise gear" against Resistance Bands falls from 0.495 to 0.438. It didn't change the order here, but it did on the house query.
+
+**One reason you might still do it, which this app doesn't measure:** if a chunk later goes to an LLM, as in RAG, having the price in the text lets the model read and repeat it.
+
+#### Experiment B: give the query a real number
+
+What if the query really states a number? Here the query says the price it wants, and a weight sets how much the price counts. Only price is used. Weight 0 is the same as text only.
+
+| Weight | "smart home device", wanting $1000 | "exercise gear", wanting $2000 |
+|---:|---|---|
+| 0 | Video Doorbell $149, Smart Thermostat $219, Security Camera $80 | Resistance Bands $20, Yoga Mat $40, Dumbbell Set $329 |
+| 0.1 | Video Doorbell $149, Smart Thermostat $219, Security Camera $80 | Resistance Bands $20, **Carbon Road Bike $3,299**, Yoga Mat $40 |
+| 0.3 | Video Doorbell $149, Smart Thermostat $219, **Water Leak Kit $1,099** | **Carbon Road Bike $3,299**, Gaming Laptop $2,500, Resistance Bands $20 |
+| 0.5 | **Water Leak Kit $1,099**, Smart Thermostat $219, Video Doorbell $149 | **Carbon Road Bike $3,299**, Gaming Laptop $2,500, Ultralight Notebook $1,349 |
+| 1 | **Water Leak Kit $1,099**, Gaming Laptop $2,500, Ultralight Notebook $1,349 | **Carbon Road Bike $3,299**, Gaming Laptop $2,500, Ultralight Notebook $1,349 |
+| 2 | **Water Leak Kit $1,099**, Gaming Laptop $2,500, Carbon Road Bike $3,299 | **Carbon Road Bike $3,299**, Gaming Laptop $2,500, Ultralight Notebook $1,349 |
+
+Bold marks the product matching both the meaning and the price.
+
+**So numeric columns can help.** At weight 0.5, "smart home device" around $1000 finds the one smart home product at that price, which text only misses, while its other results are still smart home products. Text only can't do this.
+
+**But the weight is hard to get right.** At weight 1 and above, a Gaming Laptop appears for a smart home search. The weight that works differs by query: a low target needed far more. "Smart home device" wanting $15 only finds the $14.99 Smart LED Bulb at weight 2, and by then the price is dominating. You'd need to tune this on real queries, and you'd also need a way to get a number out of the query at all.
+
+A filter or sort avoids this tuning when you know the rule, but a price target can express something a filter can't: "around $1000", where closer is better and no row is ruled out.
+
+#### So when do numeric columns help?
+
+| Approach | Ordinary searches | Queries about numbers | What it needs |
+|---|---|---|---|
+| **Numeric columns, invented query numbers** (the notebook) | Hurts | Hurts | Nothing extra |
+| **Numbers written into the text** | Roughly neutral | Barely helps | Nothing extra |
+| **Numeric columns, real query numbers and a weight** | Neutral at weight 0, hurts at high weights | Helps for "close to X" | A number from the query, and tuning |
+| **Text embedding plus metadata filter** | Works | Exact | A rule from the person or the query |
+
+**A caveat on all of this.** These are 30 products, 25 of them written for this app, with one small model and a few queries, so they show how each approach behaves and don't rank them in general. A larger model may read numbers better, and a different table may reward different choices. Run this kind of check on your own data before choosing.
 
 ## What to take away
 
@@ -210,4 +318,4 @@ This isn't a verdict on combining text and numbers in general. It's this recipe:
 2. A method's name doesn't tell you what it does. "Semantic chunking" here is structural, and in a "hybrid embedding" the part that isn't an embedding can outweigh the part that is.
 3. Structure is a strong signal when a document has it.
 4. Check your chunks against your model's token limit, because anything past it is silently ignored.
-5. Use embeddings for meaning and filters for facts.
+5. Use embeddings for meaning and filters for facts. Writing numbers into text doesn't make a model understand them.

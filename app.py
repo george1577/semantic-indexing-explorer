@@ -8,9 +8,14 @@ import streamlit as st
 
 from semantic_lab.embedder import MODEL_NAME, Embedder, load_embedder
 from semantic_lab.pipelines import (
+    DIGITS,
     METHODS,
+    NUMERIC_INDEXES,
     SEMANTIC,
     STRUCTURAL,
+    TEXT_ONLY,
+    TOP_CHECKED,
+    WORDS,
     ChunkingComparison,
     ChunkingMethod,
     TableComparison,
@@ -18,12 +23,15 @@ from semantic_lab.pipelines import (
     run_chunking,
     run_keyword_vs_embeddings,
     run_table_search,
+    run_written_in,
+    score_numeric_questions,
     search_chunks,
 )
 from semantic_lab.presets import (
     CHUNK_QUESTIONS,
     NOTEBOOK_CHUNKS,
     NOTEBOOK_QUERY,
+    NUMERIC_QUESTIONS,
     TABLE_QUERIES,
     TableQuery,
     load_bach,
@@ -33,6 +41,7 @@ from semantic_lab.tables import (
     MetadataFilter,
     VectorTrace,
     load_products,
+    rank_with_target_price,
     trace_vectors,
 )
 
@@ -328,8 +337,8 @@ def tables_tab(embedder: Embedder) -> None:
     st.subheader("How do you index a row that's part meaning, part numbers?")
     st.markdown(
         "The notebook turns each table row into one list of numbers and searches those lists. Follow "
-        "the five steps below to see how a row and your query are built, how they're compared, what "
-        "filters do, and what changes when the numeric columns are removed."
+        "the six steps below to see how a row and your query are built, how they're compared, what "
+        "filters do, what changes as columns are removed, and whether numbers can be indexed better."
     )
     _set_table_defaults()
     labels = [preset.label for preset in TABLE_QUERIES]
@@ -384,17 +393,42 @@ def tables_tab(embedder: Embedder) -> None:
     result = run_table_search(products, query, filters, embedder)
     st.caption(f"{result.rows_searched} of {result.rows_total} rows pass the filters.")
     _filter_table(result, filters)
-    if not result.hybrid:
+    if result.hybrid:
+        _column_removal_step(result, trace)
+    else:
         st.warning("No rows match these filters.")
-        return
 
-    st.markdown("### Step 5: The results, with and without the numeric columns")
+    _other_ways_step(embedder)
+
+
+def _column_removal_step(result: TableComparison, trace: VectorTrace) -> None:
+    st.markdown("### Step 5: The results, as columns are removed")
     st.markdown(
-        "Read across a row to see the same rank under each index. The first column is the notebook's "
-        "index. The second removes price, rating and review count. The third also removes the in-stock "
-        "flag, leaving meaning alone."
+        "The same search runs on three indexes, each built from fewer columns. The only difference "
+        "between the last two is the in-stock flag."
+    )
+    st.dataframe(
+        pd.DataFrame(
+            {
+                "Index": ("All columns (notebook)", "Text + in-stock flag", "Text only"),
+                "Text (384 numbers)": ("Yes", "Yes", "Yes"),
+                "Price, rating, reviews (3 numbers)": ("Yes", "No", "No"),
+                "In stock (1 number)": ("Yes", "Yes", "No"),
+                "Vector size": (388, 385, 384),
+            }
+        ),
+        hide_index=True,
+        width="stretch",
     )
     _results_table(result)
+    st.markdown(f"**The same row in all three: {trace.match.product.name}**")
+    _column_removal_table(trace)
+    st.markdown(
+        "**Text + in-stock flag vs text only.** Among in-stock rows the order is the same, because "
+        "the flag treats them all alike and only lifts their similarities. An out-of-stock row gets no "
+        "lift, so it usually drops below them. Use the first of these if you always want stock counted, and "
+        "text only with a stock filter if you want to choose per search."
+    )
     st.caption("The notebook prints distance, which is 1 minus the similarity shown here.")
     st.markdown("#### Why the first column ranks as it does")
     st.altair_chart(_share_chart(result.hybrid[:RESULTS_SHOWN]), width="stretch")
@@ -402,6 +436,105 @@ def tables_tab(embedder: Embedder) -> None:
         "Each bar's parts add up to the row's similarity. Change the query and only the blue part "
         "moves. The orange and grey parts come from the row and the query's fixed medians, so they're "
         "the same whatever you type."
+    )
+
+
+def _other_ways_step(embedder: Embedder) -> None:
+    products = load_products()
+    st.markdown("### Step 6: Can numbers be indexed in a better way?")
+    st.markdown(
+        "Step 5 makes numeric columns look useless, but the notebook's query has no real numbers. "
+        f"These two experiments try something else, always on all {len(products)} products with no "
+        "filters."
+    )
+
+    st.markdown("#### Experiment A: write the numbers into the text")
+    st.markdown(
+        "This adds no extra positions to the vector: it's still 384 numbers, because the numbers "
+        "are now just more words for the model to read."
+    )
+    st.dataframe(
+        pd.DataFrame(
+            {
+                "Index": (TEXT_ONLY, DIGITS, WORDS),
+                "Sentence that gets embedded, for the first row": (
+                    products[0].text,
+                    products[0].text_with_digits,
+                    products[0].text_with_words,
+                ),
+            }
+        ),
+        hide_index=True,
+        width="stretch",
+    )
+    query = st.text_input("Search these three", "products under $10", key="written_in_query")
+    if query.strip():
+        written = run_written_in(products, query, embedder)
+
+        def cells(matches) -> list[str]:
+            return [
+                f"{m.product.name}, ${m.product.price:,.2f} ({m.similarity:.3f})" for m in matches[:5]
+            ]
+
+        table = pd.DataFrame(
+            {TEXT_ONLY: cells(written.text), DIGITS: cells(written.digits), WORDS: cells(written.words)}
+        )
+        table.insert(0, "Rank", range(1, len(table) + 1))
+        st.dataframe(table, hide_index=True, width="stretch")
+
+    st.markdown(f"**How many of the top {TOP_CHECKED} results are actually correct?**")
+    scores = score_numeric_questions(products, NUMERIC_QUESTIONS, embedder)
+    rows = [
+        {
+            "Query": score.question.query,
+            "Correct means": score.question.correct_means,
+            "Best possible": score.best_possible,
+            **{name: score.correct[name] for name in NUMERIC_INDEXES},
+        }
+        for score in scores
+    ]
+    rows.append(
+        {
+            "Query": "Total",
+            "Correct means": "",
+            "Best possible": sum(score.best_possible for score in scores),
+            **{name: sum(score.correct[name] for score in scores) for name in NUMERIC_INDEXES},
+        }
+    )
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    st.caption(
+        "A metadata filter on the same rule gets the best possible score every time, by definition. "
+        "This is a small test with one model, so read it as an illustration."
+    )
+
+    st.markdown("#### Experiment B: give the query a real number")
+    st.markdown(
+        "Here the query states the price it wants, instead of borrowing a median, and a weight sets "
+        "how much the price counts. A weight of 0 is the same as text only."
+    )
+    columns = st.columns([3, 1, 2])
+    target_query = columns[0].text_input("Search for", "smart home device", key="target_query")
+    target_price = columns[1].number_input("Price wanted ($)", 1.0, 5000.0, 1000.0, 50.0)
+    weight = columns[2].slider("Weight on price", 0.0, 2.0, 0.5, 0.1)
+    if target_query.strip():
+        matches = rank_with_target_price(products, target_query, target_price, weight, embedder)
+        st.dataframe(
+            _ranked(
+                pd.DataFrame(
+                    {
+                        "Product": [m.product.name for m in matches],
+                        "Category": [m.product.category for m in matches],
+                        "Price": [m.product.price for m in matches],
+                        "Similarity": [m.similarity for m in matches],
+                    }
+                )
+            ).head(5),
+            hide_index=True,
+            width="stretch",
+        )
+    st.caption(
+        "Try weights of 0, 0.5 and 2. Too little and the price is ignored. Too much and the price "
+        "overrides the meaning, so expensive products from any category come back."
     )
 
 
@@ -559,6 +692,34 @@ def _filter_table(result: TableComparison, filters: MetadataFilter) -> None:
     )
 
 
+def _column_removal_table(trace: VectorTrace) -> None:
+    match = trace.match
+    text = match.text_share * trace.row_length * trace.query_length
+    numeric = match.numeric_share * trace.row_length * trace.query_length
+    stock = trace.row_stock * trace.query_stock
+    st.dataframe(
+        pd.DataFrame(
+            {
+                "Index": ("All columns (notebook)", "Text + in-stock flag", "Text only"),
+                "Text": (f"{text:.3f}", f"{text:.3f}", f"{text:.3f}"),
+                "Price, rating, reviews": (f"{numeric:+.3f}", "removed", "removed"),
+                "In stock": (f"{stock:+.3f}", f"{stock:+.3f}", "removed"),
+                "Similarity": (
+                    round(match.similarity, 3),
+                    round(trace.text_and_stock_similarity, 3),
+                    round(match.text_similarity, 3),
+                ),
+            }
+        ),
+        hide_index=True,
+        width="stretch",
+    )
+    st.caption(
+        "The middle columns are the amounts added up before dividing by the vectors' lengths. Change "
+        "the row in Step 2 to follow another one. An out-of-stock row shows the flag's effect best."
+    )
+
+
 def _results_table(result: TableComparison) -> None:
     def cells(matches) -> list[str]:
         return [f"{m.product.name} ({m.similarity:.3f})" for m in matches[:RESULTS_SHOWN]]
@@ -566,7 +727,7 @@ def _results_table(result: TableComparison) -> None:
     table = pd.DataFrame(
         {
             "All columns (notebook)": cells(result.hybrid),
-            "Without numeric columns": cells(result.without_numbers),
+            "Text + in-stock flag": cells(result.text_and_stock),
             "Text only": cells(result.text),
         }
     )

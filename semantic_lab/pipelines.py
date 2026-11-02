@@ -15,7 +15,7 @@ from semantic_lab.chunkers import (
 )
 from semantic_lab.embedder import Embedder
 from semantic_lab.keyword import BagOfWords, build_bag_of_words, query_similarities
-from semantic_lab.presets import ChunkQuestion
+from semantic_lab.presets import ChunkQuestion, NumericQuestion
 from semantic_lab.similarity import cosine_matrix
 from semantic_lab.tables import (
     HybridMatch,
@@ -25,6 +25,7 @@ from semantic_lab.tables import (
     rank_hybrid,
     rank_text,
     rank_text_and_stock,
+    rank_written_in,
 )
 
 FIXED = "Fixed-size"
@@ -165,7 +166,7 @@ def _answer_rank(
 @dataclass(frozen=True)
 class TableComparison:
     hybrid: list[HybridMatch]  # all columns, the notebook's way
-    without_numbers: list[RowMatch]  # the text part and the in-stock flag
+    text_and_stock: list[RowMatch]  # the text part and the in-stock flag
     text: list[RowMatch]  # the text part alone
     unfiltered: list[HybridMatch]  # every row, to show a filter leaves similarities alone
     rows_searched: int
@@ -184,3 +185,66 @@ def run_table_search(
         len(hybrid),
         len(products),
     )
+
+
+# The ways of indexing a row's numbers that Step 6 compares.
+TEXT_ONLY = "Text only"
+DIGITS = "Digits in the text"
+WORDS = "Words in the text"
+ALL_COLUMNS = "All columns (notebook)"
+NUMERIC_INDEXES = (TEXT_ONLY, DIGITS, WORDS, ALL_COLUMNS)
+TOP_CHECKED = 5
+
+
+@dataclass(frozen=True)
+class WrittenInComparison:
+    text: list[RowMatch]
+    digits: list[RowMatch]
+    words: list[RowMatch]
+
+
+@dataclass(frozen=True)
+class NumericScore:
+    question: NumericQuestion
+    rows_correct: int  # in the whole table
+    best_possible: int  # how many of the top results could be correct
+    correct: dict[str, int]  # index name -> how many of its top results are correct
+
+
+def run_written_in(
+    products: Sequence[Product], query: str, embedder: Embedder
+) -> WrittenInComparison:
+    return WrittenInComparison(
+        rank_text(products, query, embedder, MetadataFilter()),
+        rank_written_in(products, query, embedder, lambda p: p.text_with_digits),
+        rank_written_in(products, query, embedder, lambda p: p.text_with_words),
+    )
+
+
+def score_numeric_questions(
+    products: Sequence[Product], questions: Sequence[NumericQuestion], embedder: Embedder
+) -> list[NumericScore]:
+    """How many of each index's top results actually satisfy each question."""
+    scores = []
+    for question in questions:
+        written = run_written_in(products, question.query, embedder)
+        hybrid = rank_hybrid(products, question.query, embedder, MetadataFilter())
+        rankings = {
+            TEXT_ONLY: written.text,
+            DIGITS: written.digits,
+            WORDS: written.words,
+            ALL_COLUMNS: hybrid,
+        }
+        rows_correct = sum(question.is_correct(p) for p in products)
+        scores.append(
+            NumericScore(
+                question,
+                rows_correct,
+                min(rows_correct, TOP_CHECKED),
+                {
+                    name: sum(question.is_correct(m.product) for m in matches[:TOP_CHECKED])
+                    for name, matches in rankings.items()
+                },
+            )
+        )
+    return scores

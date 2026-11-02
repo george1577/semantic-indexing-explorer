@@ -1,7 +1,7 @@
 """Indexing a product table: the notebook's hybrid vector, and a text embedding plus metadata filters."""
 
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -35,6 +35,31 @@ class Product:
     def text(self) -> str:
         """The notebook's way of writing a row as one string."""
         return f"Product: {self.name}. Description: {self.description}. Category: {self.category}"
+
+    @property
+    def text_with_digits(self) -> str:
+        """The sentence with the row's numbers written in as digits."""
+        stock = "yes" if self.in_stock else "no"
+        return (
+            f"{self.text}. Price: ${self.price:.2f}. Rating: {self.rating} out of 5. "
+            f"Reviews: {self.review_count}. In stock: {stock}"
+        )
+
+    @property
+    def text_with_words(self) -> str:
+        """The sentence with the row's numbers written in as descriptive words."""
+        rating = "excellent" if self.rating >= 4.7 else "good" if self.rating >= 4.4 else "average"
+        if self.review_count >= 1000:
+            popularity = "very popular"
+        elif self.review_count >= 300:
+            popularity = "popular"
+        else:
+            popularity = "few reviews"
+        stock = "in stock" if self.in_stock else "out of stock"
+        return (
+            f"{self.text}. Price range: {self.price_range}. Rating: {rating}. "
+            f"Popularity: {popularity}. Availability: {stock}"
+        )
 
 
 @dataclass(frozen=True)
@@ -113,6 +138,14 @@ class VectorTrace:
     @property
     def vector_size(self) -> int:
         return len(self.row_embedding) + len(self.row_scaled) + 1
+
+    @property
+    def text_and_stock_similarity(self) -> float:
+        """This row's similarity once price, rating and review count are removed."""
+        return _text_similarity(
+            np.append(self.query_embedding, self.query_stock),
+            np.append(self.row_embedding, self.row_stock),
+        )
 
 
 def price_range(price: float) -> str:
@@ -199,6 +232,39 @@ def rank_text(
         RowMatch(product, _text_similarity(query_embedding, embedding))
         for product, embedding in zip(products, embeddings)
         if filters.allows(product)
+    ]
+    return sorted(matches, key=lambda m: -m.similarity)
+
+
+def rank_written_in(
+    products: Sequence[Product], query: str, embedder: Embedder, sentence: Callable[[Product], str]
+) -> list[RowMatch]:
+    """Search one embedding per row, each made from the sentence `sentence` writes for it. The vector
+    stays 384 numbers long, because the numbers are now just more words.
+    """
+    query_embedding = embedder.encode([query])[0]
+    embeddings = embedder.encode([sentence(p) for p in products])
+    matches = [
+        RowMatch(product, _text_similarity(query_embedding, embedding))
+        for product, embedding in zip(products, embeddings)
+    ]
+    return sorted(matches, key=lambda m: -m.similarity)
+
+
+def rank_with_target_price(
+    products: Sequence[Product], query: str, target_price: float, weight: float, embedder: Embedder
+) -> list[RowMatch]:
+    """A hybrid vector whose query really states a number: the text part plus the scaled price, with
+    the price multiplied by `weight` on both sides. Weight 0 is the same as text only.
+    """
+    scaling = fit_scaling(products)
+    prices = _numeric_matrix(products)[:, 0]
+    scale = lambda price: weight * (price - scaling.means[0]) / scaling.deviations[0]  # noqa: E731
+    query_vector = np.append(embedder.encode([query])[0], scale(target_price))
+    embeddings = embedder.encode([p.text for p in products])
+    matches = [
+        RowMatch(product, _text_similarity(query_vector, np.append(embedding, scale(price))))
+        for product, embedding, price in zip(products, embeddings, prices)
     ]
     return sorted(matches, key=lambda m: -m.similarity)
 

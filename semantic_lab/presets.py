@@ -1,9 +1,10 @@
 """Everything the app ships with for its tabs to start from."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from semantic_lab.tables import MetadataFilter
+from semantic_lab.tables import MetadataFilter, Product
 
 BACH_FILE = Path(__file__).parent.parent / "data" / "bach.md"
 
@@ -60,6 +61,42 @@ TABLE_QUERIES = (
         MetadataFilter(price_range="affordable", in_stock=True),
         notebook_only=True,
     ),
+)
+
+
+@dataclass(frozen=True)
+class NumericQuestion:
+    """A query that asks about a number or flag, and how to check a row actually satisfies it."""
+
+    query: str
+    correct_means: str
+    is_correct: Callable[[Product], bool]
+
+
+NUMERIC_QUESTIONS = (
+    NumericQuestion("products under $10", "Under $10", lambda p: p.price < 10),
+    NumericQuestion("cheap products", "Under $50", lambda p: p.price < 50),
+    NumericQuestion(
+        "cheap kitchen tools", "Kitchen, under $50", lambda p: p.price < 50 and p.category == "Kitchen"
+    ),
+    NumericQuestion(
+        "coffee under $30", "Coffee, under $30", lambda p: p.price < 30 and "offee" in p.name
+    ),
+    NumericQuestion("luxury items over $1000", "$1000 or more", lambda p: p.price >= 1000),
+    NumericQuestion(
+        "expensive electronics",
+        "Electronics, $200 or more",
+        lambda p: p.price >= 200 and p.category == "Electronics",
+    ),
+    NumericQuestion("products rated 4.8 or higher", "Rated 4.8 or more", lambda p: p.rating >= 4.8),
+    NumericQuestion("highly rated products", "Rated 4.7 or more", lambda p: p.rating >= 4.7),
+    NumericQuestion(
+        "very popular products with many reviews",
+        "1000 reviews or more",
+        lambda p: p.review_count >= 1000,
+    ),
+    NumericQuestion("out of stock items", "Out of stock", lambda p: not p.in_stock),
+    NumericQuestion("products in stock", "In stock", lambda p: p.in_stock),
 )
 
 

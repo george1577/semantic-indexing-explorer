@@ -90,13 +90,13 @@ for p in five:
     t = trace_vectors(five, p, query, embedder)
     print(f"  {p.name[:24]:25} length {t.row_length:.3f} shares {t.match.text_share:+.3f} {t.match.numeric_share:+.3f} {t.match.in_stock_share:+.3f} = {t.match.similarity:.3f} text alone {t.match.text_similarity:.3f}")
 
-print("== Tab 3 with and without numeric columns")
+print("== Tab 3 all columns, text + in-stock flag, text only")
 queries = [x.query for x in TABLE_QUERIES[:4]]
 for label, rows in (("5", five), ("30", products)):
     for q in queries:
         r = run_table_search(rows, q, MetadataFilter(), embedder)
         print(label, q)
-        for n, ms in (("all", r.hybrid), ("no numbers", r.without_numbers), ("text", r.text)):
+        for n, ms in (("all", r.hybrid), ("text+stock", r.text_and_stock), ("text", r.text)):
             print(f"   {n:11}", [f"{x.product.name[:20]} {x.similarity:.3f}" for x in ms[:5]])
 
 print("== Tab 3 filters")
@@ -112,3 +112,29 @@ r = run_table_search(five, "affordable products", MetadataFilter(), embedder)
 print("unfiltered", [(x.product.name[:20], round(x.similarity, 3)) for x in r.hybrid])
 r = run_table_search(products, "something to keep my house safe", MetadataFilter(in_stock=True), embedder)
 print("safe in-stock text", [(x.product.name[:20], round(x.similarity, 3)) for x in r.text[:3]])
+
+
+print("== Step 6 A: numbers written into the text")
+from semantic_lab.pipelines import NUMERIC_INDEXES, run_written_in, score_numeric_questions
+from semantic_lab.presets import NUMERIC_QUESTIONS
+from semantic_lab.tables import rank_text, rank_with_target_price
+import numpy as np
+
+print(products[0].text_with_digits); print(products[0].text_with_words)
+for q in [x.query for x in TABLE_QUERIES[:4]] + ["products under $10", "cheap products"]:
+    w = run_written_in(products, q, embedder)
+    print(q)
+    for n, ms in (("text", w.text), ("digits", w.digits), ("words", w.words)):
+        print(f"   {n:7}", [f"{x.product.name[:22]} ${x.product.price:g} {x.similarity:.3f}" for x in ms[:5]])
+scores = score_numeric_questions(products, NUMERIC_QUESTIONS, embedder)
+for s in scores:
+    print(f"{s.question.query:42} best {s.best_possible}", s.correct)
+print("totals best", sum(s.best_possible for s in scores), {n: sum(s.correct[n] for s in scores) for n in NUMERIC_INDEXES})
+labels = ["Price: $10.00", "Price: $11.00", "Price: $100.00", "Price: $1000.00", "Price: $9000.00"]
+v = embedder.encode(labels); print(labels); print(np.round(v @ v.T, 2))
+
+print("== Step 6 B: a query with a real price")
+for q, price in (("smart home device", 1000), ("exercise gear", 2000), ("smart home device", 15), ("exercise gear", 25), ("coffee", 15)):
+    print(q, price)
+    for weight in (0, 0.1, 0.3, 0.5, 1, 2):
+        print(f"   w={weight:<4}", [f"{m.product.name[:24]} ${m.product.price:g}" for m in rank_with_target_price(products, q, price, weight, embedder)[:3]])

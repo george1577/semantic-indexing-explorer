@@ -144,6 +144,13 @@ def test_numeric_and_stock_shares_never_depend_on_the_query():
     assert first.text_share != pytest.approx(second.text_share)
 
 
+def test_trace_gives_the_same_similarity_as_the_text_and_stock_ranking():
+    ranked = {m.product: m.similarity for m in rank_text_and_stock(PRODUCTS, "q", EMBEDDER, EVERYTHING)}
+    for product in PRODUCTS:
+        trace = trace_vectors(PRODUCTS, product, "q", EMBEDDER)
+        assert trace.text_and_stock_similarity == pytest.approx(ranked[product])
+
+
 def test_removing_numbers_keeps_the_text_and_the_stock_flag():
     matches = {m.product.name: m.similarity for m in rank_text_and_stock(PRODUCTS, "q", EMBEDDER, EVERYTHING)}
     # one: text 1, in stock. query [1, 0, 1], row [1, 0, 1]
@@ -163,3 +170,27 @@ def test_rejections_name_every_failed_rule():
     )
     assert MetadataFilter().rejections(PRODUCTS[1]) == ()
     assert MetadataFilter(in_stock=False).allows(PRODUCTS[1])
+
+
+def test_written_in_sentences_state_the_rows_values():
+    product = load_products()[2]  # the out-of-stock camera, $79.99, rated 4.3, 89 reviews
+    assert product.text in product.text_with_digits
+    assert "Price: $79.99. Rating: 4.3 out of 5. Reviews: 89. In stock: no" in product.text_with_digits
+    assert "Price range: mid-range. Rating: average. Popularity: few reviews. Availability: out of stock" in product.text_with_words
+
+
+def test_a_target_price_of_weight_zero_is_text_only():
+    from semantic_lab.tables import rank_with_target_price
+
+    weighted = rank_with_target_price(PRODUCTS, "q", 90.0, 0.0, EMBEDDER)
+    plain = rank_text(PRODUCTS, "q", EMBEDDER, EVERYTHING)
+    assert [m.product for m in weighted] == [m.product for m in plain]
+    assert [m.similarity for m in weighted] == pytest.approx([m.similarity for m in plain])
+
+
+def test_a_heavy_weight_lets_the_target_price_win_over_meaning():
+    from semantic_lab.tables import rank_with_target_price
+
+    # "two" means nothing like the query, but its price is on the wanted side of the mean.
+    matches = rank_with_target_price(PRODUCTS[:2], "q", 20.0, 50.0, EMBEDDER)
+    assert matches[0].product.name == "two"
