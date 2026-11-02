@@ -56,28 +56,153 @@ The last column comes from seven preset questions. It counts a chunk as the answ
 
 ## 3. Indexing tables
 
-A product row has text, numbers and a true/false flag. The notebook joins them into one **hybrid vector**: the row's text embedding, then its scaled price, rating and review count, then 1 or 0 for in stock. A query has no numbers, so it borrows each column's median and claims to be in stock.
+So far everything has been text. A product table also has prices, ratings and true/false flags. This section follows one row and one query all the way through the notebook's method, using its five products. The app's third tab shows the same steps for any row and any query.
 
-**The numbers drown out the text.** A text embedding has length 1, but the structured part is longer: 1.2 to 2.6 on the notebook's five products. So it has a large say in the angle between vectors. With no filters on those five products, here's the top result for six different queries:
+| Product | Category | Price | Rating | Reviews | In stock |
+|---|---|---:|---:|---:|---|
+| Gaming Laptop Pro | Electronics | $2,499.99 | 4.8 | 156 | Yes |
+| Wireless Noise-Cancelling Headphones | Electronics | $349.99 | 4.6 | 243 | Yes |
+| Smart Home Security Camera | Smart Home | $79.99 | 4.3 | 89 | No |
+| Organic Coffee Beans | Food & Beverages | $24.99 | 4.7 | 312 | Yes |
+| Yoga Mat | Sports & Fitness | $39.99 | 4.5 | 178 | Yes |
 
-| Query | Hybrid vector | Text embedding |
+### Step 1: Every row is one chunk
+
+Yes, each row is treated as one **chunk**. Nothing is split, so five rows make five searchable items, and a search returns whole rows.
+
+### Step 2: Build the row's vector and the query's vector
+
+#### The row
+
+A **hybrid vector** is one long list of numbers standing for the whole row. Gaming Laptop Pro's is built in three parts.
+
+**The text part.** The text columns are written out as one sentence, and the model turns that sentence into 384 numbers:
+
+```
+Product: Gaming Laptop Pro. Description: High-performance gaming laptop with
+RTX 3080, 32GB RAM, and 1TB SSD. Category: Electronics
+
+→ [-0.042, 0.060, -0.062, -0.044, … 380 more]
+```
+
+**The numeric part.** Raw prices would swamp ratings, so each number is scaled: (value − column mean) ÷ column standard deviation. The result says how far the value is from typical, and in which direction.
+
+| Column | Laptop's value | Column mean | Standard deviation | Scaled |
+|---|---:|---:|---:|---:|
+| Price | 2,499.99 | 598.99 | 957.823 | **1.985** |
+| Rating | 4.8 | 4.58 | 0.172 | **1.279** |
+| Reviews | 156 | 195.6 | 76.207 | **−0.520** |
+
+**The stock flag.** In stock is 1, and out of stock is 0. The laptop gets **1**.
+
+**Join them end to end**, for 384 + 3 + 1 = 388 numbers:
+
+```
+Laptop:  [-0.042, 0.060, -0.062, … (384 text numbers) …,  1.985, 1.279, -0.520,  1]
+          └───────────── text part ──────────────────┘    └── numeric ───────┘   └ stock
+```
+
+#### The query
+
+The query must be the same shape as the rows to be compared with them. But "Top Notebook for Gaming and Work" has no price, rating or stock status, so the notebook fills those positions in:
+
+| Part | Where it comes from | Value |
 |---|---|---|
-| Top Notebook for Gaming and Work | Yoga Mat | Gaming Laptop Pro |
-| morning caffeine | Yoga Mat | Organic Coffee Beans |
-| something to keep my house safe | Yoga Mat | Smart Home Security Camera |
-| exercise gear | Yoga Mat | Yoga Mat |
-| affordable products | Yoga Mat | Wireless Noise-Cancelling Headphones |
-| cheap kitchen tools | Yoga Mat | Organic Coffee Beans |
+| Text (384 numbers) | The query, through the same model | `[-0.037, -0.033, -0.022, -0.041, …]` |
+| Price | The column's median, $79.99, scaled | −0.542 |
+| Rating | The column's median, 4.6, scaled | 0.116 |
+| Reviews | The column's median, 178, scaled | −0.231 |
+| In stock | Always assumed to be yes | 1 |
 
-**Most of the score ignores the query.** The query's structured part is the same every time. So each row's numeric and in-stock contributions never change, whatever you type. For Yoga Mat those fixed parts add +0.127 and +0.403. Only the text contribution moves, and on the gaming query it adds just +0.029.
+**The last four numbers are identical for every query.** Whatever you type, the query claims to want a median-priced, median-rated, in-stock product.
 
-**The notebook's filters hide this.** Its first query filters to luxury items in stock, and only one product is left, so it can't be ranked wrong. But it does show the cost: Gaming Laptop Pro has a text similarity of 0.620 and a hybrid similarity of 0.189 (the notebook's distance of 0.811).
+### Step 3: Compare the two vectors
 
-**More rows weaken the effect but don't remove it.** With all 30 products, Yoga Mat is first on 3 of the 6 queries, and second on the other 3. The gaming query's top hybrid result is still Yoga Mat, and Gaming Laptop Pro ranks 25th of 30, while the text embedding ranks it first.
+**Similarity** multiplies the two vectors position by position, adds up the results, then divides by both vectors' lengths. Grouping the positions by part shows what each one adds. The laptop's vector has length 2.801 and the query's has length 1.536, so the divisor is 4.303.
 
-**Text embeddings have their own blind spot.** On all 30 products, "affordable products" puts Running Shoes first, at $119. An embedding captures what a description is about, not whether a number is low. That's the job of a **metadata filter**, which removes rows before scoring and so never changes a similarity. Choosing "affordable" as a price range does what the words in the query can't.
+| Part | Multiplied and added | ÷ 4.303 |
+|---|---:|---:|
+| Text | 0.620 | +0.144 |
+| Price, rating, reviews | −0.807 | −0.187 |
+| In stock | 1.000 | +0.232 |
+| **Similarity** | **0.813** | **0.189** |
 
-**This isn't a verdict on hybrid vectors in general.** It's this recipe: unweighted numbers, and a query with no numeric intent of its own. Weighting the parts differently could change the picture, but the app doesn't explore that. The takeaway is to check what's actually driving your similarity before you trust it.
+The notebook prints this as a distance, 1 − 0.189 = 0.811.
+
+Those two numbers explain the rest of this section. Text similarity alone would be 0.620, which is a strong match, and two things shrink it:
+
+- **The price disagrees with the query's invented median.** The laptop is expensive and the query "wants" $79.99, which costs −0.187.
+- **Unusual numbers make a longer vector.** A longer vector means a bigger divisor, which shrinks everything the row scores.
+
+Here is the same sum for all five rows. Only the Text column depends on what you typed:
+
+| Product | Vector length | Text | Numeric | In stock | Similarity | Rank |
+|---|---:|---:|---:|---:|---:|---:|
+| Yoga Mat | 1.616 | +0.029 | +0.127 | +0.403 | 0.559 | 1 |
+| Wireless Noise-Cancelling Headphones | 1.571 | +0.067 | +0.004 | +0.414 | 0.486 | 2 |
+| Organic Coffee Beans | 2.276 | +0.015 | +0.015 | +0.286 | 0.316 | 3 |
+| Gaming Laptop Pro | 2.801 | +0.144 | −0.187 | +0.232 | 0.189 | 4 |
+| Smart Home Security Camera | 2.429 | +0.034 | +0.115 | +0.000 | 0.149 | 5 |
+
+Yoga Mat wins a gaming search because its numbers sit close to the medians, which gives it a short vector and agreement with the query's fixed numbers. Its description hardly matters.
+
+### Step 4: Metadata filters
+
+So far every row has been ranked. A **metadata filter** decides which rows get ranked at all. It's a yes-or-no rule checked against a row's own columns. The notebook stores four columns for this: price range, category, rating and in stock.
+
+Price range is a label worked out from the price:
+
+| Price range | Price |
+|---|---|
+| budget | under $10 |
+| affordable | $10 to under $50 |
+| mid-range | $50 to under $200 |
+| premium | $200 to under $1,000 |
+| luxury | $1,000 and up |
+
+**A filter runs first, and ranking only sees what's left.** Here's the notebook's second query, "affordable products", filtered to price range = affordable and in stock = yes:
+
+| Product | Price range | In stock | Filter result | Similarity, no filter | Similarity, filtered |
+|---|---|---|---|---:|---:|
+| Yoga Mat | affordable | Yes | **Keep** | 0.646 | 0.646 |
+| Organic Coffee Beans | affordable | Yes | **Keep** | 0.378 | 0.378 |
+| Wireless Noise-Cancelling Headphones | premium | Yes | Removed: wrong price range | 0.553 | |
+| Smart Home Security Camera | mid-range | No | Removed: wrong price range, out of stock | 0.169 | |
+| Gaming Laptop Pro | luxury | Yes | Removed: wrong price range | 0.118 | |
+
+Notice that the kept rows' similarities don't change. Headphones scored higher than the coffee beans, but it's still gone, because a filter is absolute.
+
+**The notebook's filters hide the problem in Step 3.** Its first query filters to luxury and in stock, which leaves only Gaming Laptop Pro. A single row can't be ranked wrong, so its output looks fine, despite a similarity of just 0.189.
+
+**Why filters and embeddings need each other.** Search all 30 products for "affordable products" using text only, and the top result is Running Shoes at $119, followed by Headphones at $349.99. The model knows what products are about, not whether a price is low. Add the affordable filter and the top result is Protein Snack Box at $36. The filter handled the fact, and the embedding handled the meaning.
+
+| | A column in the vector | A metadata filter |
+|---|---|---|
+| **What it does** | Nudges a row's similarity up or down | Keeps or removes the row |
+| **Effect on similarity** | Changes it, for every query | None |
+| **Follows what you asked?** | No: a query's numbers are invented | Yes: you choose the rule |
+| **Good for** | Not shown to help in this example | Hard facts such as price, stock and category |
+
+### Step 5: Results with and without the numeric columns
+
+Here's the top result on the five products, with no filters, as columns are removed:
+
+| Query | All columns (notebook) | Without numeric columns | Text only |
+|---|---|---|---|
+| Top Notebook for Gaming and Work | Yoga Mat (0.559) | **Gaming Laptop Pro** (0.810) | **Gaming Laptop Pro** (0.620) |
+| morning caffeine | Yoga Mat (0.571) | **Organic Coffee Beans** (0.633) | **Organic Coffee Beans** (0.265) |
+| something to keep my house safe | Yoga Mat (0.607) | Headphones (0.595) | **Smart Home Security Camera** (0.353) |
+| exercise gear | **Yoga Mat** (0.696) | **Yoga Mat** (0.705) | **Yoga Mat** (0.411) |
+
+Bold marks the product you'd expect. Reading across:
+
+- **Removing price, rating and reviews fixes most of it.** Three of the four queries now find the right product. So the numeric columns are what override the meaning.
+- **The stock flag does the remaining damage.** The camera is the right answer to the house query but is out of stock, and the query always claims to want stock. It falls from first to last (0.353 text only, 0.250 with the flag), even though nobody asked about stock.
+- **Text only finds the right product on all four.**
+
+All 30 products tell the same story. For the gaming query, the notebook's method puts Yoga Mat first and Gaming Laptop Pro 25th. Without the numeric columns, Gaming Laptop Pro is first and the Ultralight Business Notebook second. With more rows Yoga Mat doesn't always win, though it's first or second on all four queries here.
+
+This isn't a verdict on combining text and numbers in general. It's this recipe: unweighted numbers, and a query that has no real numeric intent of its own. The app doesn't try other weightings.
 
 ## What to take away
 

@@ -8,6 +8,8 @@ from semantic_lab.tables import (
     price_range,
     rank_hybrid,
     rank_text,
+    rank_text_and_stock,
+    trace_vectors,
 )
 from tests.conftest import TableEmbedder
 
@@ -113,3 +115,51 @@ def test_bundled_products():
     notebook = load_products(notebook_only=True)
     assert [p.name for p in notebook][:2] == ["Gaming Laptop Pro", "Wireless Noise-Cancelling Headphones"]
     assert len(notebook) == 5
+
+
+def test_trace_follows_every_step_of_one_row():
+    trace = trace_vectors(PRODUCTS, PRODUCTS[0], "q", EMBEDDER)
+    assert trace.vector_size == 6
+    assert trace.row_stock == 1 and trace.query_stock == 1
+    assert trace.row_numbers == pytest.approx([10, 4.0, 10])
+    assert trace.query_numbers == pytest.approx([20, 4.5, 20])
+    assert trace.row_scaled == pytest.approx((trace.row_numbers - trace.scaling.means) / trace.scaling.deviations)
+
+    ranked = next(m for m in rank_hybrid(PRODUCTS, "q", EMBEDDER, EVERYTHING) if m.product == PRODUCTS[0])
+    assert trace.match == ranked
+    row = np.concatenate([trace.row_embedding, trace.row_scaled, [trace.row_stock]])
+    query = np.concatenate([trace.query_embedding, trace.query_scaled, [trace.query_stock]])
+    assert trace.row_length == pytest.approx(np.linalg.norm(row))
+    assert trace.query_length == pytest.approx(np.linalg.norm(query))
+    assert trace.match.similarity == pytest.approx(query @ row / (trace.row_length * trace.query_length))
+
+
+def test_numeric_and_stock_shares_never_depend_on_the_query():
+    vectors = {**VECTORS, "other": [0, 1]}
+    embedder = TableEmbedder(vectors)
+    first = trace_vectors(PRODUCTS, PRODUCTS[0], "q", embedder).match
+    second = trace_vectors(PRODUCTS, PRODUCTS[0], "other", embedder).match
+    assert first.numeric_share == pytest.approx(second.numeric_share)
+    assert first.in_stock_share == pytest.approx(second.in_stock_share)
+    assert first.text_share != pytest.approx(second.text_share)
+
+
+def test_removing_numbers_keeps_the_text_and_the_stock_flag():
+    matches = {m.product.name: m.similarity for m in rank_text_and_stock(PRODUCTS, "q", EMBEDDER, EVERYTHING)}
+    # one: text 1, in stock. query [1, 0, 1], row [1, 0, 1]
+    assert matches["one"] == pytest.approx(1)
+    # two: text 0, out of stock. query [1, 0, 1], row [0, 1, 0]
+    assert matches["two"] == pytest.approx(0)
+    # three: text 0.6, in stock. (0.6 + 1) / (sqrt(2) * sqrt(2))
+    assert matches["three"] == pytest.approx(0.8)
+
+
+def test_rejections_name_every_failed_rule():
+    filters = MetadataFilter(price_range="luxury", category="B", in_stock=True, min_rating=4.5)
+    assert filters.rejections(PRODUCTS[1]) == (
+        "price range is affordable, not luxury",
+        "category is A, not B",
+        "out of stock",
+    )
+    assert MetadataFilter().rejections(PRODUCTS[1]) == ()
+    assert MetadataFilter(in_stock=False).allows(PRODUCTS[1])

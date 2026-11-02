@@ -12,6 +12,7 @@ from semantic_lab.embedder import Embedder
 PRODUCTS_FILE = Path(__file__).parent.parent / "data" / "products.json"
 NUMERIC_COLUMNS = ("price", "rating", "review_count")
 PRICE_RANGES = ("budget", "affordable", "mid-range", "premium", "luxury")
+QUERY_STOCK = 1.0  # the notebook assumes a query wants products in stock
 
 
 @dataclass(frozen=True)
@@ -45,13 +46,21 @@ class MetadataFilter:
     in_stock: bool | None = None
     min_rating: float | None = None
 
+    def rejections(self, product: Product) -> tuple[str, ...]:
+        """Why this filter removes a row, one reason per failed rule. Empty means the row stays."""
+        reasons = []
+        if self.price_range is not None and product.price_range != self.price_range:
+            reasons.append(f"price range is {product.price_range}, not {self.price_range}")
+        if self.category is not None and product.category != self.category:
+            reasons.append(f"category is {product.category}, not {self.category}")
+        if self.in_stock is not None and product.in_stock != self.in_stock:
+            reasons.append("out of stock" if self.in_stock else "in stock")
+        if self.min_rating is not None and product.rating < self.min_rating:
+            reasons.append(f"rating {product.rating} is under {self.min_rating}")
+        return tuple(reasons)
+
     def allows(self, product: Product) -> bool:
-        return (
-            (self.price_range is None or product.price_range == self.price_range)
-            and (self.category is None or product.category == self.category)
-            and (self.in_stock is None or product.in_stock == self.in_stock)
-            and (self.min_rating is None or product.rating >= self.min_rating)
-        )
+        return not self.rejections(product)
 
 
 @dataclass(frozen=True)
@@ -67,9 +76,43 @@ class HybridMatch:
 
 
 @dataclass(frozen=True)
-class TextMatch:
+class RowMatch:
     product: Product
     similarity: float
+
+
+@dataclass(frozen=True)
+class Scaling:
+    """How each numeric column was scaled: subtract its mean, divide by its standard deviation."""
+
+    means: np.ndarray
+    deviations: np.ndarray
+    medians: np.ndarray
+
+    def scale(self, numbers: np.ndarray) -> np.ndarray:
+        return (numbers - self.means) / self.deviations
+
+
+@dataclass(frozen=True)
+class VectorTrace:
+    """Every step in building one row's hybrid vector and the query's, and in comparing them."""
+
+    match: HybridMatch
+    row_embedding: np.ndarray
+    row_numbers: np.ndarray
+    row_scaled: np.ndarray
+    row_stock: float
+    row_length: float
+    query_embedding: np.ndarray
+    query_numbers: np.ndarray  # the column medians, since a query has no numbers
+    query_scaled: np.ndarray
+    query_stock: float
+    query_length: float
+    scaling: Scaling
+
+    @property
+    def vector_size(self) -> int:
+        return len(self.row_embedding) + len(self.row_scaled) + 1
 
 
 def price_range(price: float) -> str:
@@ -91,58 +134,105 @@ def load_products(notebook_only: bool = False) -> list[Product]:
     return [p for p in products if p.from_notebook] if notebook_only else products
 
 
+def fit_scaling(products: Sequence[Product]) -> Scaling:
+    numbers = _numeric_matrix(products)
+    deviations = numbers.std(axis=0)
+    return Scaling(
+        numbers.mean(axis=0), np.where(deviations > 0, deviations, 1.0), np.median(numbers, axis=0)
+    )
+
+
 def rank_hybrid(
     products: Sequence[Product], query: str, embedder: Embedder, filters: MetadataFilter
 ) -> list[HybridMatch]:
-    """Search as the notebook does. Numbers are scaled across all `products`, and the query has no
-    numbers of its own, so it borrows the median of each column and claims to be in stock.
+    """Search as the notebook does. Numbers are scaled across all `products`, including rows a filter
+    later removes, so a filter never changes a similarity.
     """
-    numbers = _numeric_matrix(products)
-    means, deviations = numbers.mean(axis=0), numbers.std(axis=0)
-    deviations = np.where(deviations > 0, deviations, 1.0)
-    scaled = (numbers - means) / deviations
-    query_numbers = (np.median(numbers, axis=0) - means) / deviations
-    query_stock = 1.0
-
-    query_text = embedder.encode([query])[0]
-    query_norm = np.sqrt(query_text @ query_text + query_numbers @ query_numbers + query_stock**2)
+    scaling = fit_scaling(products)
+    query_embedding = embedder.encode([query])[0]
     embeddings = embedder.encode([p.text for p in products])
+    scaled_rows = scaling.scale(_numeric_matrix(products))
+    matches = [
+        _trace(product, embedding, scaled, query_embedding, scaling).match
+        for product, embedding, scaled in zip(products, embeddings, scaled_rows)
+        if filters.allows(product)
+    ]
+    return sorted(matches, key=lambda m: -m.similarity)
 
-    matches = []
-    for product, text, row_numbers in zip(products, embeddings, scaled):
-        if not filters.allows(product):
-            continue
-        stock = float(product.in_stock)
-        row_norm = np.sqrt(text @ text + row_numbers @ row_numbers + stock**2)
-        denominator = query_norm * row_norm
-        text_share = float(query_text @ text / denominator)
-        numeric_share = float(query_numbers @ row_numbers / denominator)
-        stock_share = query_stock * stock / denominator
-        matches.append(
-            HybridMatch(
-                product,
-                text_share + numeric_share + stock_share,
-                text_share,
-                numeric_share,
-                stock_share,
-                _text_similarity(query_text, text),
-            )
-        )
+
+def trace_vectors(
+    products: Sequence[Product], product: Product, query: str, embedder: Embedder
+) -> VectorTrace:
+    """Build and compare the hybrid vectors for one row and the query, keeping every step."""
+    scaling = fit_scaling(products)
+    numbers = _numeric_matrix([product])[0]
+    return _trace(
+        product,
+        embedder.encode([product.text])[0],
+        scaling.scale(numbers),
+        embedder.encode([query])[0],
+        scaling,
+    )
+
+
+def rank_text_and_stock(
+    products: Sequence[Product], query: str, embedder: Embedder, filters: MetadataFilter
+) -> list[RowMatch]:
+    """The hybrid vector with its numeric columns removed: the text part and the in-stock flag."""
+    query_embedding = embedder.encode([query])[0]
+    query_vector = np.append(query_embedding, QUERY_STOCK)
+    matches = [
+        RowMatch(product, _text_similarity(query_vector, np.append(embedding, float(product.in_stock))))
+        for product, embedding in zip(products, embedder.encode([p.text for p in products]))
+        if filters.allows(product)
+    ]
     return sorted(matches, key=lambda m: -m.similarity)
 
 
 def rank_text(
     products: Sequence[Product], query: str, embedder: Embedder, filters: MetadataFilter
-) -> list[TextMatch]:
-    """The correction: compare meaning with meaning, and let filters handle numbers and flags."""
-    query_text = embedder.encode([query])[0]
+) -> list[RowMatch]:
+    """Meaning against meaning: only the text part, with filters handling numbers and flags."""
+    query_embedding = embedder.encode([query])[0]
     embeddings = embedder.encode([p.text for p in products])
     matches = [
-        TextMatch(product, _text_similarity(query_text, text))
-        for product, text in zip(products, embeddings)
+        RowMatch(product, _text_similarity(query_embedding, embedding))
+        for product, embedding in zip(products, embeddings)
         if filters.allows(product)
     ]
     return sorted(matches, key=lambda m: -m.similarity)
+
+
+def _trace(
+    product: Product,
+    embedding: np.ndarray,
+    scaled: np.ndarray,
+    query_embedding: np.ndarray,
+    scaling: Scaling,
+) -> VectorTrace:
+    query_scaled = scaling.scale(scaling.medians)
+    stock = float(product.in_stock)
+    row_length = float(np.sqrt(embedding @ embedding + scaled @ scaled + stock**2))
+    query_length = float(
+        np.sqrt(query_embedding @ query_embedding + query_scaled @ query_scaled + QUERY_STOCK**2)
+    )
+    divisor = row_length * query_length
+    text_share = float(query_embedding @ embedding / divisor)
+    numeric_share = float(query_scaled @ scaled / divisor)
+    stock_share = QUERY_STOCK * stock / divisor
+    match = HybridMatch(
+        product,
+        text_share + numeric_share + stock_share,
+        text_share,
+        numeric_share,
+        stock_share,
+        _text_similarity(query_embedding, embedding),
+    )
+    numbers = scaled * scaling.deviations + scaling.means
+    return VectorTrace(
+        match, embedding, numbers, scaled, stock, row_length,
+        query_embedding, scaling.medians, query_scaled, QUERY_STOCK, query_length, scaling,
+    )
 
 
 def _numeric_matrix(products: Sequence[Product]) -> np.ndarray:

@@ -70,3 +70,45 @@ for label, q in (("heading fix effect", "Who was Bach's first wife?"), ("", "Whe
         chunks = c.method(name).chunks
         h = search_chunks(chunks, q, embedder)[0]
         print(q, name, round(h.similarity, 3), len(chunks[h.chunk_index]))
+
+
+print("== Tab 3 worked example (notebook's 5 products)")
+from semantic_lab.tables import trace_vectors
+
+five = load_products(notebook_only=True)
+query = "Top Notebook for Gaming and Work"
+t = trace_vectors(five, five[0], query, embedder)
+print("sentence:", five[0].text)
+print("size", t.vector_size, "means", t.scaling.means.round(3), "stds", t.scaling.deviations.round(3), "medians", t.scaling.medians.round(3))
+print("row text", t.row_embedding[:4].round(3), "scaled", t.row_scaled.round(3), "stock", t.row_stock, "length", round(t.row_length, 3))
+print("query text", t.query_embedding[:4].round(3), "scaled", t.query_scaled.round(3), "stock", t.query_stock, "length", round(t.query_length, 3))
+m = t.match
+d = t.row_length * t.query_length
+print(f"divisor {d:.3f} raw text {m.text_share*d:.3f} numbers {m.numeric_share*d:.3f} stock {m.in_stock_share*d:.3f} total {m.similarity*d:.3f}")
+print(f"shares text {m.text_share:.3f} numbers {m.numeric_share:.3f} stock {m.in_stock_share:.3f} similarity {m.similarity:.3f}")
+for p in five:
+    t = trace_vectors(five, p, query, embedder)
+    print(f"  {p.name[:24]:25} length {t.row_length:.3f} shares {t.match.text_share:+.3f} {t.match.numeric_share:+.3f} {t.match.in_stock_share:+.3f} = {t.match.similarity:.3f} text alone {t.match.text_similarity:.3f}")
+
+print("== Tab 3 with and without numeric columns")
+queries = [x.query for x in TABLE_QUERIES[:4]]
+for label, rows in (("5", five), ("30", products)):
+    for q in queries:
+        r = run_table_search(rows, q, MetadataFilter(), embedder)
+        print(label, q)
+        for n, ms in (("all", r.hybrid), ("no numbers", r.without_numbers), ("text", r.text)):
+            print(f"   {n:11}", [f"{x.product.name[:20]} {x.similarity:.3f}" for x in ms[:5]])
+
+print("== Tab 3 filters")
+luxury = MetadataFilter(price_range="luxury", in_stock=True)
+afford = MetadataFilter(price_range="affordable", in_stock=True)
+for p in five:
+    print(f"  {p.name[:24]:25} ${p.price} {p.price_range} stock={p.in_stock} luxury: {luxury.rejections(p) or 'keep'} afford: {afford.rejections(p) or 'keep'}")
+for rows, q, f in ((five, "affordable products", afford), (products, "affordable products", MetadataFilter()), (products, "affordable products", MetadataFilter(price_range="affordable"))):
+    r = run_table_search(rows, q, f, embedder)
+    print(len(rows), q, f.price_range, r.rows_searched, "hybrid", [(x.product.name[:20], round(x.similarity, 3)) for x in r.hybrid[:4]])
+    print("   text", [(x.product.name[:20], x.product.price, round(x.similarity, 3)) for x in r.text[:4]])
+r = run_table_search(five, "affordable products", MetadataFilter(), embedder)
+print("unfiltered", [(x.product.name[:20], round(x.similarity, 3)) for x in r.hybrid])
+r = run_table_search(products, "something to keep my house safe", MetadataFilter(in_stock=True), embedder)
+print("safe in-stock text", [(x.product.name[:20], round(x.similarity, 3)) for x in r.text[:3]])

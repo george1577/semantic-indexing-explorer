@@ -58,3 +58,18 @@ def test_filters_that_match_nothing_warn(app):
     _widget(app.checkbox, "Notebook's 5 products only").set_value(True).run()
     assert not app.exception
     assert any("No rows match" in warning.value for warning in app.warning)
+
+
+def test_tracing_an_added_product_survives_the_switch_to_notebook_rows(app):
+    _widget(app.selectbox, "Row to follow").set_value("Wooden Spoon Set").run()
+    assert not app.exception
+    _widget(app.checkbox, "Notebook's 5 products only").set_value(True).run()
+    assert not app.exception
+
+
+def test_an_empty_table_query_asks_for_one(app):
+    next(w for w in app.text_input if w.key == "table_query").set_value(" ").run()
+    assert not app.exception
+    assert any("Enter a query" in info.value for info in app.info)
+    next(w for w in app.text_input if w.key == "table_query").set_value("coffee").run()
+    assert not app.exception

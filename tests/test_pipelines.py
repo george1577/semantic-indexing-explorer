@@ -70,5 +70,6 @@ def test_table_search_counts_rows_and_returns_both_rankings(fake_embedder):
     products = load_products()
     result = run_table_search(products, "coffee", MetadataFilter(in_stock=False), fake_embedder)
     assert result.rows_total == 30
-    assert result.rows_searched == len(result.hybrid) == len(result.text)
+    assert result.rows_searched == len(result.hybrid) == len(result.text) == len(result.without_numbers)
+    assert len(result.unfiltered) == 30
     assert 0 < result.rows_searched < 30

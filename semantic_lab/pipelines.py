@@ -21,9 +21,10 @@ from semantic_lab.tables import (
     HybridMatch,
     MetadataFilter,
     Product,
-    TextMatch,
+    RowMatch,
     rank_hybrid,
     rank_text,
+    rank_text_and_stock,
 )
 
 FIXED = "Fixed-size"
@@ -163,8 +164,10 @@ def _answer_rank(
 
 @dataclass(frozen=True)
 class TableComparison:
-    hybrid: list[HybridMatch]
-    text: list[TextMatch]
+    hybrid: list[HybridMatch]  # all columns, the notebook's way
+    without_numbers: list[RowMatch]  # the text part and the in-stock flag
+    text: list[RowMatch]  # the text part alone
+    unfiltered: list[HybridMatch]  # every row, to show a filter leaves similarities alone
     rows_searched: int
     rows_total: int
 
@@ -173,5 +176,11 @@ def run_table_search(
     products: Sequence[Product], query: str, filters: MetadataFilter, embedder: Embedder
 ) -> TableComparison:
     hybrid = rank_hybrid(products, query, embedder, filters)
-    text = rank_text(products, query, embedder, filters)
-    return TableComparison(hybrid, text, len(text), len(products))
+    return TableComparison(
+        hybrid,
+        rank_text_and_stock(products, query, embedder, filters),
+        rank_text(products, query, embedder, filters),
+        rank_hybrid(products, query, embedder, MetadataFilter()),
+        len(hybrid),
+        len(products),
+    )
